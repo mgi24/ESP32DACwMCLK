@@ -3,20 +3,23 @@
 #include "audio_data.h"  // Include the header file with audio data
 
 
-const int numtaps = 101; // Jumlah koefisien filter
-float fir_coefficients[numtaps] = {
-  0.0013314656590260256, 0.0013534178607180472, 0.0014058624152166591, 0.0014890566690132728, 0.001603117599609812, 0.001748020132548862, 0.0019235961389301357, 0.002129534122510832, 0.002365379602000791, 0.002630536190631662, 0.002924267371521364,
-   0.0032456989637897594, 0.003593822270827496, 0.00396749789859631, 0.004365460228364659, 0.004786322524875693, 0.005228582657623999, 0.005690629409700414, 0.006170749345568882, 0.006667134206181491, 0.007177888797034355, 0.007701039332132867,
-   0.008234542194384301, 0.008776293070682575, 0.009324136417906402, 0.009875875214229389, 0.010429280948549216, 0.010982103799491669, 0.011532082954341695, 0.01207695701740428, 0.012614474456707771, 0.01314240403763484, 0.013658545192004169,
-   0.014160738271329456, 0.014646874633451518, 0.015114906512471481, 0.015562856622905546, 0.015988827450228827, 0.01639101018147253, 0.01676769323127602, 0.017117270320765824, 0.01743824806882636, 0.017729253057731056, 0.017989038337705557,
-   0.01821648933778265, 0.018410629153267737, 0.018570623183247918, 0.018695783094831667, 0.018785570094181636, 0.018839597487883674, 0.018857632521761904, 0.018839597487883674, 0.018785570094181636, 0.018695783094831667,
-   0.018570623183247915, 0.018410629153267737, 0.018216489337782648, 0.017989038337705553, 0.017729253057731053, 0.017438248068826358, 0.017117270320765824, 0.016767693231276012, 0.016391010181472526, 0.015988827450228827, 0.015562856622905545,
-   0.015114906512471481, 0.014646874633451512, 0.014160738271329455, 0.013658545192004164, 0.013142404037634838, 0.01261447445670777, 0.012076957017404277, 0.011532082954341693, 0.010982103799491662, 0.01042928094854921, 0.009875875214229387,
-   0.009324136417906399, 0.008776293070682574, 0.008234542194384294, 0.0077010393321328635, 0.007177888797034355, 0.006667134206181487, 0.006170749345568882, 0.005690629409700409, 0.005228582657623997, 0.004786322524875687, 0.004365460228364653,
-   0.00396749789859631, 0.0035938222708274906, 0.003245698963789757, 0.00292426737152136, 0.0026305361906316604, 0.002365379602000791, 0.002129534122510828, 0.0019235961389301346, 0.00174802013254886, 0.0016031175996098108, 
-  0.0014890566690132728, 0.001405862415216658, 0.0013534178607180472, 0.0013314656590260256
-};
-#define mutepin 23
+//install all pin!!!
+#define mutepin 32
+#define mosfetpin 33
+#define powerbtn 27
+#define vbat 14
+#define btled 5
+#define lowbatled 22
+#define clipled 23
+#define ppnext 15 // install pullup 1K and 1K divider, 2 button in 1 pin
+                  // ppnext + 1K - 3.3V
+                  //        + 1K - BTN - GND
+                  //        + BTN - GND
+#define opprev 4  // copy ppnext
+
+
+
+
 //handle task
 TaskHandle_t BufferProcess;
 
@@ -62,33 +65,149 @@ i2s_config_t i2s_config_mono = {
                                         
 };
 
-float vReal[1000];
-float bufferLeft[numtaps] = {0};
-uint32_t bufferlen;
-int bufferIndex = 0;
-bool buf_go = 0;
-bool i2s_go = 1;
+
+
+
+
+
+#define FILTER_TAP_NUM 29
+#define LOG_SAMPLES 10
+#define LOG_VOLT 30
+#define BUFFER_SIZE 4000
+
+const float filter_taps[FILTER_TAP_NUM] = {
+  0.0012, 0.0027, 0.0063, 0.0121, 0.0203, 0.0304, 0.0415, 0.0526, 0.0625,
+  0.0702, 0.0748, 0.0757, 0.0727, 0.0656, 0.0547, 0.0412, 0.0261, 0.0105,
+  -0.0036, -0.0155, -0.0245, -0.0303, -0.0324, -0.0310, -0.0261, -0.0183,
+  -0.0085, 0.0022, 0.0129
+};
+
+
+float amplitudeLog[LOG_SAMPLES];
+float logvolt[LOG_VOLT];
+int16_t audiobuff[BUFFER_SIZE];
+size_t audiolen = 0;
+float sampleBuffer[BUFFER_SIZE/2];
+float filteredSamples[BUFFER_SIZE/2];
+
+float maxVoltage(float volt) {
+  // Geser semua elemen ke kiri
+  for (int i = 0; i < LOG_VOLT - 1; i++) {
+    logvolt[i] = logvolt[i + 1];
+  }
+
+  // Tambahkan amplitude baru di posisi terakhir
+  logvolt[LOG_VOLT - 1] = volt;
+  float maxVal = logvolt[0];
+  // Iterasi melalui semua elemen untuk menemukan nilai tertinggi
+  for (int i = 1; i < LOG_VOLT; i++) {
+    if (logvolt[i] > maxVal) {
+      maxVal = logvolt[i];
+    }
+  }
+  return maxVal;
+}
+
+
+void logAmplitude(float amplitude) {
+  // Geser semua elemen ke kiri
+  for (int i = 0; i < LOG_SAMPLES - 1; i++) {
+    amplitudeLog[i] = amplitudeLog[i + 1];
+  }
+
+  // Tambahkan amplitude baru di posisi terakhir
+  amplitudeLog[LOG_SAMPLES - 1] = amplitude;
+}
+
+float findMinAmplitude() {
+  float minVal = amplitudeLog[0];  // Asumsikan nilai pertama adalah minimum
+
+  // Iterasi melalui semua elemen untuk menemukan nilai terendah
+  for (int i = 1; i < LOG_SAMPLES; i++) {
+    if (amplitudeLog[i] < minVal) {
+      minVal = amplitudeLog[i];
+    }
+  }
+
+  return minVal;
+}
+
+
+float batvolt = 0;
+bool buffgo = 0;
+
 void bufferprocess(void *parameter){
   Serial.print("BUFFER LOOP using core ");  Serial.print(xPortGetCoreID());
   Serial.print(", priority = "); Serial.println(uxTaskPriorityGet(NULL));
   while(true){
+    if (buffgo){
+      size_t injectlen = audiolen;
+      for (size_t i = 0; i < injectlen/2; i++){
+        sampleBuffer[i] = (float)audiobuff[i*2] / 32768.0;  // Normalisasi data 16-bit
+      }
+      // Aplikasi filter FIR
+      for (size_t i = 0; i < injectlen/2; i++) {
+        filteredSamples[i] = 0;
+        for (int j = 0; j < FILTER_TAP_NUM; j++) {
+          if (i - j >= 0) {
+            filteredSamples[i] += sampleBuffer[i - j] * filter_taps[j];
+          }
+        }
+      }
+      //amplitude
+      float amplitude=0;
+      for (size_t i = 0; i < injectlen/2; i++) {
+        amplitude+=abs(filteredSamples[i]);
+      }
+      logAmplitude(amplitude);
 
-    vTaskDelay(1/portTICK_PERIOD_MS);
+      int ledbrightness = 10*(amplitude-findMinAmplitude());
+      // Serial.print(findMinAmplitude()*5,6);
+      // Serial.print(",");
+      // Serial.println(amplitude*5,6);
+      analogWrite(clipled, ledbrightness);
+      //Serial.print(analogRead(vbat));
+      
+      batvolt = (float(analogRead(vbat)) - 1850) * (4.15 - 3.0) / (2800 - 1850) + 3.0;
+      //Serial.print(batvolt);
+      //Serial.print(",");
+      //Serial.println(maxVoltage(batvolt));
+      if (maxVoltage(batvolt)<3.40){
+        digitalWrite(lowbatled,HIGH);
+      }
+      else{
+        digitalWrite(lowbatled,LOW);
+      }
+    }
+    
+    vTaskDelay(100/portTICK_PERIOD_MS);
   }
 }
+
+
+
 // Callback function to process received audio data
 
 void audio_data_callback(const uint8_t *data, uint32_t len) {
+  // len is in bytes, divide by 4 to get the number of 16-bit stereo samples
+  size_t num_samples = len / 4;
+  audiolen = num_samples * 2;
+  // Temporary buffer to store converted int16_t data
+  int16_t i2s_data[num_samples * 2];
 
-  
+  for (size_t i = 0; i < num_samples; i++) {
+    // Convert each stereo sample from uint8_t to int16_t
+    int16_t left = (data[i * 4 + 1] << 8) | data[i * 4];        // Left channel
+    int16_t right = (data[i * 4 + 3] << 8) | data[i * 4 + 2];   // Right channel
 
+    // Store the converted data in the i2s_data buffer
+    i2s_data[i * 2] = left;
+    i2s_data[i * 2 + 1] = right;
+  }
+  memcpy(audiobuff, i2s_data, sizeof(i2s_data));
   size_t i2s_bytes_written;
-  // Serial.print("LEN ");
-  // Serial.print(len);
-  // Serial.print(" TIME ");
-  // Serial.println(millis()-timer);
-  // timer = millis();
-  i2s_write(I2S_NUM_0, data, len, &i2s_bytes_written, portMAX_DELAY);
+
+  i2s_write(I2S_NUM_0, i2s_data, sizeof(i2s_data), &i2s_bytes_written, portMAX_DELAY);
 }
 
 void startup_sound(){
@@ -125,11 +244,29 @@ void startup_sound(){
 
 void setup() {
   Serial.begin(115200);
-  
+
+  //pinmode selector
+  pinMode(mosfetpin, OUTPUT);
   pinMode(mutepin, OUTPUT);
+  pinMode(btled, OUTPUT);
+  pinMode(clipled, OUTPUT);
+  pinMode(lowbatled, OUTPUT);
+
+  pinMode(vbat, INPUT);
+  pinMode(powerbtn, INPUT);
+  pinMode(ppnext, INPUT);
+  pinMode(opprev, INPUT);
+
+  //output pin default state
+  digitalWrite(btled, LOW);
+  digitalWrite(lowbatled, LOW);
+  digitalWrite(mosfetpin, HIGH);
   digitalWrite(mutepin, LOW);
+  analogWrite(clipled, 0);
+
   
   startup_sound();
+  //delay(1000);
   
   // Configure and initialize I2S driver
   i2s_driver_install(I2S_NUM_0, &i2s_config_stereo, 0, NULL);
@@ -142,7 +279,9 @@ void setup() {
   a2dp_sink.set_auto_reconnect(true);
 
   // Initialize Bluetooth A2DP sink with device name
-  a2dp_sink.start("ESP32_A2DP_SINK");
+  a2dp_sink.start("Harman/Kardon Genie");
+  uint8_t battery_level = 50;
+
   //RUNNING ON CORE 0
   xTaskCreatePinnedToCore(
     bufferprocess,     // Fungsi untuk task1
@@ -151,17 +290,181 @@ void setup() {
     NULL,      // Parameter task1
     5,         // Prioritas task1
     &BufferProcess,    // Handle task1
-    0          // Jalankan pada core 0
+    0          // Jalankan pada core 1
   );
 }
 
+long presstime=0;
+long presstimeprev=0;
+bool pausestate=0;
+bool nextpressed=0;
+bool ignorenext=0;
+bool ignoreprev=0;
+bool prevpressed=0;
+int volume=0;
+bool pppressed=0;
+long pptime = 0;
+bool ignorepp = 0;
+bool isplay=1;
+long optime=0;
+bool oppress=0;
+bool ignoreop = 0;
+bool isconnected = 0;
+bool turnoff = 0;
+
+
+
+
+
 void loop() {
+  
+  
+
+  if (a2dp_sink.is_connected()){
+    isconnected = 1;
+    volume = a2dp_sink.get_volume();
+    digitalWrite(btled, LOW);
+
+  }
+  else{
+    isconnected = 0;
+    digitalWrite(btled, HIGH);
+
+  }
   
   //MUTE
   if (a2dp_sink.get_audio_state()==2){
-    digitalWrite(mutepin, HIGH);
+    
+    if (volume==0 || isconnected == 0){
+      digitalWrite(mutepin, LOW);
+      buffgo=0;
+    }
+    else{
+      digitalWrite(mutepin, HIGH);
+      buffgo=1;
+    }
+    
   }
   else{
+    buffgo = 0;
     digitalWrite(mutepin, LOW);
   }
+  //play pause
+  if (analogRead(ppnext)>1000 && analogRead(ppnext)<3000){
+    pppressed = 1;
+    pptime = millis();
+
+    while (analogRead(ppnext)>1000 && analogRead(ppnext)<3000){
+      if(millis()-pptime>10 && ignorepp == 0){
+        ignorepp=1;
+        if (isplay == 1){
+          isplay=0;
+          Serial.println("PAUSED");
+          a2dp_sink.pause();
+        }
+        else{
+          isplay=1;
+          Serial.println("PLAYED");
+          a2dp_sink.play();
+        }
+      }
+    }
+    ignorepp=0;
+    pppressed = 0;
+  }
+
+  //operator button
+  if (analogRead(opprev)>1000 && analogRead(opprev)<3000){
+    oppress = 1;
+    optime = millis();
+    while(analogRead(opprev)>1000 && analogRead(opprev)<3000){
+      if(millis()-optime>700 && ignoreop == 0){
+        ignoreop=1;
+        Serial.println("OP PRESS LONG, DISCONNECTING!");
+        //add more things like disconnect bt
+        a2dp_sink.disconnect();
+        
+      }
+    }
+  }
+
+
+  //next + volup
+  if (analogRead(ppnext)==0){
+    
+    nextpressed = 1;
+    presstime = millis();
+    while(analogRead(ppnext)==0){
+      if(millis()-presstime>700 && ignorenext == 0){
+        Serial.println("NEXT SONG");
+        a2dp_sink.next();
+        ignorenext=1;
+      }
+    }
+
+  }
+  if(analogRead(ppnext)>4000){
+    if(millis()-presstime > 10 && ignorenext==0 && nextpressed == 1){
+      Serial.println("VOL UP");
+      if (volume<130){
+        volume=volume+10;
+        a2dp_sink.set_volume(volume);
+        
+      }
+      if (volume>130){
+        volume=130;
+      }
+    }
+    ignorenext = 0;
+    nextpressed = 0;
+    
+  }
+
+  //prev+ vol
+  if (analogRead(opprev)==0){
+    
+    prevpressed = 1;
+    presstimeprev = millis();
+    while(analogRead(opprev)==0){
+      if(millis()-presstimeprev>700 && ignoreprev == 0){
+        Serial.println("PREV SONG");
+        a2dp_sink.previous();
+        ignoreprev=1;
+      }
+    }
+
+  }
+  if(analogRead(opprev)>4000){
+    if(millis()-presstimeprev > 10 && ignoreprev==0 && prevpressed == 1){
+      Serial.println("VOL DOWN");
+      if (volume>0){
+        volume=volume-10;
+        if (volume<=0){
+        volume=0;
+        }
+        a2dp_sink.set_volume(volume);
+        
+      }
+    }
+    //op button bounce
+    if(millis()-optime > 10 && ignoreop==0 && oppress == 1){
+      Serial.println("OP PRESS QUICK");
+
+    }
+    ignoreprev = 0;
+    prevpressed = 0;
+    ignoreop = 0;
+    oppress = 0;
+  }
+
+  
+  Serial.println(analogRead(powerbtn));
+  //SHUTDOWN
+  if (analogRead(powerbtn)<1000){
+    analogWrite(mutepin,LOW);
+    delay(800);
+    analogWrite(mosfetpin,LOW);
+  } 
+  
+  
 }
